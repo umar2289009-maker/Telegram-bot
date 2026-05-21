@@ -162,6 +162,15 @@ def init_db():
         INSERT INTO settings (key, value) VALUES ('reg_code', 'мэлкоины')
         ON CONFLICT (key) DO NOTHING
     """)
+    _выполнить("""
+        CREATE TABLE IF NOT EXISTS promocodes (
+            code TEXT PRIMARY KEY,
+            монеты INT NOT NULL,
+            uses_left INT NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            comment TEXT NOT NULL DEFAULT ''
+        )
+    """)
     log.info("БД инициализирована ✅")
 
 init_db()
@@ -172,7 +181,40 @@ init_db()
 ждёт_админ = {}  # user_id -> {"действие": str, "chat_id": int}
 ждёт_пароль_админ = {}  # user_id -> chat_id (ожидает ввод пароля для /админ)
 ждёт_смена_кода = {}  # user_id -> True (ожидает ввод нового кода регистрации)
+ждёт_промокод_создать = {}  # user_id -> True (ожидает ввод данных нового промокода)
 казик = {}  # chat_id -> blackjack state (краткосрочное, не требует персистентности)
+
+# ─── Промокоды ────────────────────────────────────────────────────────────────
+
+def создать_промокод(код: str, монеты: int, uses: int = 1, comment: str = "") -> bool:
+    """Создаёт новый промокод. Возвращает False если такой уже есть."""
+    existing = _выполнить("SELECT code FROM promocodes WHERE code = %s", (код.upper(),), fetch="one")
+    if existing:
+        return False
+    _записать(
+        "INSERT INTO promocodes (code, монеты, uses_left, created_at, comment) VALUES (%s, %s, %s, %s, %s)",
+        (код.upper(), монеты, uses, str(date.today()), comment)
+    )
+    return True
+
+def использовать_промокод(код: str) -> Optional[int]:
+    """
+    Пробует использовать промокод.
+    Возвращает кол-во монет если успешно, None если не найден/использован.
+    """
+    row = _выполнить("SELECT монеты, uses_left FROM promocodes WHERE code = %s", (код.upper(),), fetch="one")
+    if not row or row["uses_left"] <= 0:
+        return None
+    монеты = row["монеты"]
+    if row["uses_left"] == 1:
+        _записать("DELETE FROM promocodes WHERE code = %s", (код.upper(),))
+    else:
+        _записать("UPDATE promocodes SET uses_left = uses_left - 1 WHERE code = %s", (код.upper(),))
+    return монеты
+
+def список_промокодов() -> list:
+    """Возвращает все активные промокоды."""
+    return _выполнить("SELECT code, монеты, uses_left, comment FROM promocodes ORDER BY created_at DESC", fetch="all") or []
 
 # ─── Код авторизации (кэш + БД) ──────────────────────────────────────────────
 
@@ -1118,6 +1160,7 @@ def кнопки_админа():
     )
     markup.row(
         InlineKeyboardButton("🔑 Код регистрации", callback_data="admin_рег_код"),
+        InlineKeyboardButton("🎟 Промокоды", callback_data="admin_промокоды"),
     )
     return markup
 
@@ -1916,6 +1959,39 @@ def admin_callback(call):
                 "✏️ *Введи новый код регистрации:*\n\n"
                 "_Минимум 3 символа. Регистр не важен при вводе._",
                 parse_mode="Markdown")
+
+        elif действие == "промокоды":
+            коды = список_промокодов()
+            markup = InlineKeyboardMarkup()
+            markup.row(
+                InlineKeyboardButton("➕ Создать промокод", callback_data="admin_создать_промокод"),
+                InlineKeyboardButton("🗑 Удалить промокод", callback_data="admin_удалить_промокод"),
+            )
+            if not коды:
+                текст = "🎟 *Промокоды*\n\nАктивных промокодов нет.\nСоздай первый!"
+            else:
+                строки = [f"🎟 *Промокоды ({len(коды)} активных):*\n"]
+                for к in коды:
+                    ком = f" — _{к['comment']}_" if к.get("comment") else ""
+                    строки.append(f"• `{к['code']}` → {к['монеты']}🪙 × {к['uses_left']} исп.{ком}")
+                текст = "\n".join(строки)
+            bot.send_message(chat_id, текст, parse_mode="Markdown", reply_markup=markup)
+
+        elif действие == "создать_промокод":
+            ждёт_промокод_создать[user_id] = True
+            bot.send_message(chat_id,
+                "🎟 *Создать промокод*\n\n"
+                "Введи в формате:\n"
+                "`КОД МОНЕТЫ ИСПОЛЬЗОВАНИЙ`\n\n"
+                "Примеры:\n"
+                "`MELCOIN 1000 1` — одноразовый на 1000 монет\n"
+                "`PROMO500 500 10` — 10 использований по 500 монет\n\n"
+                "_КОД автоматически станет заглавными буквами_",
+                parse_mode="Markdown")
+
+        elif действие == "удалить_промокод":
+            ждёт_админ[user_id] = {"действие": "удалить_промокод", "chat_id": chat_id}
+            bot.send_message(chat_id, "🗑 Введи код промокода для удаления:", parse_mode="Markdown")
 
     except Exception as e:
         log.error(f"admin callback error: {e}")
@@ -2826,6 +2902,51 @@ def финал_казика(chat_id, user_id, имя, рука, дилер, ко
     )
     bot.send_message(chat_id, текст, parse_mode="Markdown", reply_markup=markup)
 
+@bot.message_handler(commands=["промокод", "promo"])
+def команда_промокод(message):
+    try:
+        user_id = message.from_user.id
+        chat_id = message.chat.id
+        имя = получить_имя(user_id) or message.from_user.first_name or "незнакомец"
+
+        if not получить_имя(user_id):
+            bot.send_message(chat_id, "❌ Сначала зарегистрируйся через /start")
+            return
+
+        args = message.text.strip().split()
+        if len(args) < 2:
+            bot.send_message(chat_id,
+                "🎟 *Промокод*\n\n"
+                "Использование: `/промокод КОД`\n\n"
+                "Пример: `/промокод MELCOIN`",
+                parse_mode="Markdown")
+            return
+
+        код_ввод = args[1].strip().upper()
+        монеты_пром = использовать_промокод(код_ввод)
+
+        if монеты_пром is None:
+            bot.send_message(chat_id,
+                "❌ *Промокод не найден или уже использован*\n\n"
+                "_Проверь код и попробуй ещё раз_",
+                parse_mode="Markdown")
+            return
+
+        начислить_мэлкоины(user_id, имя, монеты_пром, chat_id)
+        статы = загрузить_статы()
+        игрок = получить_игрока(статы, user_id, имя)
+        баланс = игрок.get("мэлкоины", 0)
+        bot.send_message(chat_id,
+            f"🎉 *Промокод активирован!*\n\n"
+            f"🎟 Код: `{код_ввод}`\n"
+            f"💰 Начислено: *+{монеты_пром} мэлкоинов* 🪙\n"
+            f"💼 Баланс: *{баланс} 🪙*\n\n"
+            f"_Спасибо что поддерживаешь, {имя}! 🔥_",
+            parse_mode="Markdown")
+
+    except Exception as e:
+        log.error(f"/промокод error: {e}")
+
 @bot.message_handler(commands=["казик", "blackjack", "bj"])
 def казик_команда(message):
     try:
@@ -3683,6 +3804,15 @@ def ответ(message):
                             f"{'❌ Ошибок: ' + str(ошибки) if ошибки else ''}",
                             parse_mode="Markdown")
 
+                    elif действие == "удалить_промокод":
+                        код_удал = ввод.strip().upper()
+                        existing = _выполнить("SELECT code FROM promocodes WHERE code = %s", (код_удал,), fetch="one")
+                        if existing:
+                            _записать("DELETE FROM promocodes WHERE code = %s", (код_удал,))
+                            bot.send_message(chat_id, f"🗑 Промокод `{код_удал}` удалён.", parse_mode="Markdown")
+                        else:
+                            bot.send_message(chat_id, f"❌ Промокод `{код_удал}` не найден.", parse_mode="Markdown")
+
                 except ValueError:
                     bot.send_message(chat_id, "❌ Неверный формат числа.")
                 except Exception as exc:
@@ -3720,6 +3850,36 @@ def ответ(message):
                     "Спроси у своих — они знают 😏\n\n"
                     "_Попробуй ещё раз:_",
                     parse_mode="Markdown")
+            return
+
+        # Ожидание ввода нового промокода (создание)
+        if ждёт_промокод_создать.get(user_id) and is_admin(user_id):
+            ждёт_промокод_создать.pop(user_id, None)
+            части = message.text.strip().split()
+            if len(части) < 2:
+                bot.send_message(chat_id, "❌ Неверный формат. Пример: `MELCOIN 1000 1`", parse_mode="Markdown")
+                return
+            код_новый = части[0].upper()
+            try:
+                монеты_новые = int(части[1])
+                uses_новые = int(части[2]) if len(части) >= 3 else 1
+            except ValueError:
+                bot.send_message(chat_id, "❌ Монеты и использования — это числа.", parse_mode="Markdown")
+                return
+            if монеты_новые <= 0 or uses_новые <= 0:
+                bot.send_message(chat_id, "❌ Числа должны быть больше нуля.", parse_mode="Markdown")
+                return
+            успех = создать_промокод(код_новый, монеты_новые, uses_новые)
+            if успех:
+                bot.send_message(chat_id,
+                    f"✅ *Промокод создан!*\n\n"
+                    f"🎟 Код: `{код_новый}`\n"
+                    f"💰 Монеты: {монеты_новые} 🪙\n"
+                    f"🔢 Использований: {uses_новые}\n\n"
+                    f"_Отправь код игроку — он введёт /промокод {код_новый}_",
+                    parse_mode="Markdown")
+            else:
+                bot.send_message(chat_id, f"❌ Промокод `{код_новый}` уже существует. Выбери другой код.", parse_mode="Markdown")
             return
 
         # Ожидание нового кода (только для смены кода в админке)
