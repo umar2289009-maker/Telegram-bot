@@ -159,6 +159,7 @@ init_db()
 # Краткосрочное состояние (ОК в памяти — теряется только при рестарте, не критично)
 ждёт_имя  = {}
 ждёт_админ = {}  # user_id -> {"действие": str, "chat_id": int}
+ждёт_пароль_админ = {}  # user_id -> chat_id (ожидает ввод пароля для /админ)
 казик = {}  # chat_id -> blackjack state (краткосрочное, не требует персистентности)
 
 # Постоянный кэш игроков — загружается из БД один раз при старте
@@ -983,36 +984,23 @@ def сохранить_имя(user_id, имя):
 # ─── Админ ───────────────────────────────────────────────────────────────────
 
 # Безопасная проверка: по user_id из БД (имя легко подделать, user_id — нет)
-_ADMIN_USER_ID: Optional[int] = None
+# ──── ADMIN: хардкод Telegram user_id Kolika ─────────────────────────────────
+# Telegram user_id нельзя подделать сменой ника или другой регистрацией.
+# Если нужно сменить — меняй только здесь.
+_ADMIN_USER_ID: int = 8020976477
+_ADMIN_ПАРОЛЬ: str = "мэлкоин2025"  # пароль для входа в /админ
 
 def _найти_admin_id():
-    """При старте ищем числовой user_id игрока с именем kolik."""
-    global _ADMIN_USER_ID
-    try:
-        статы = загрузить_статы()
-        for uid, данные in статы.items():
-            if данные.get("имя", "").lower() == "kolik":
-                _ADMIN_USER_ID = int(uid)
-                log.info(f"Admin user_id найден: {_ADMIN_USER_ID}")
-                return
-    except Exception as e:
-        log.error(f"Ошибка поиска admin_id: {e}")
+    """Оставлено для совместимости — ID теперь хардкодом."""
+    pass
 
 def зарегистрировать_admin_id(user_id: int):
-    """Вызывается когда kolik впервые регистрируется."""
-    global _ADMIN_USER_ID
-    if _ADMIN_USER_ID is None:
-        _ADMIN_USER_ID = user_id
-        log.info(f"Admin зарегистрирован: user_id={user_id}")
+    """Оставлено для совместимости — ID теперь хардкодом."""
+    pass
 
 def is_admin(user_id):
-    """Проверяем по числовому user_id — его нельзя подделать сменой ника."""
-    if _ADMIN_USER_ID is not None:
-        return int(user_id) == _ADMIN_USER_ID
-    # Фолбэк: если admin ещё не зарегистрирован, проверяем по имени
-    статы = загрузить_статы()
-    игрок = статы.get(str(user_id), {})
-    return игрок.get("имя", "").lower() == "kolik"
+    """Проверяем по хардкодному Telegram user_id — нельзя подделать."""
+    return int(user_id) == _ADMIN_USER_ID
 
 def кнопки_админа():
     markup = InlineKeyboardMarkup()
@@ -1692,11 +1680,11 @@ def команда_админ(message):
         if not is_admin(user_id):
             bot.send_message(chat_id, "👀 Иди отсюда, тут ничего нет.")
             return
+        # Запрашиваем пароль перед показом панели
+        ждёт_пароль_админ[user_id] = chat_id
         bot.send_message(chat_id,
-            "👑 *АДМИН-ПАНЕЛЬ* 👑\n\n"
-            "Добро пожаловать, Колик.\n"
-            "Выбери действие:",
-            parse_mode="Markdown", reply_markup=кнопки_админа())
+            "🔐 *Введи пароль для входа в админ-панель:*",
+            parse_mode="Markdown")
     except Exception as e:
         log.error(f"/админ error: {e}")
 
@@ -3484,6 +3472,20 @@ def ответ(message):
                 except Exception as exc:
                     bot.send_message(chat_id, f"❌ Ошибка: {exc}")
                 return
+
+        # Ожидание пароля для /админ
+        if user_id in ждёт_пароль_админ:
+            ввод = message.text.strip()
+            del ждёт_пароль_админ[user_id]
+            if ввод == _ADMIN_ПАРОЛЬ:
+                bot.send_message(chat_id,
+                    "👑 *АДМИН-ПАНЕЛЬ* 👑\n\n"
+                    "Добро пожаловать, Колик.\n"
+                    "Выбери действие:",
+                    parse_mode="Markdown", reply_markup=кнопки_админа())
+            else:
+                bot.send_message(chat_id, "❌ Неверный пароль. Иди нафиг. 💀")
+            return
 
         # Ожидание ника
         if ждёт_имя.get(user_id):
