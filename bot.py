@@ -152,15 +152,54 @@ def init_db():
             responses JSONB NOT NULL DEFAULT '[]'
         )
     """)
+    _выполнить("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    _выполнить("""
+        INSERT INTO settings (key, value) VALUES ('reg_code', 'мэлкоины')
+        ON CONFLICT (key) DO NOTHING
+    """)
     log.info("БД инициализирована ✅")
 
 init_db()
 
 # Краткосрочное состояние (ОК в памяти — теряется только при рестарте, не критично)
 ждёт_имя  = {}
+ждёт_код  = {}  # user_id -> True (ожидает ввод кода авторизации)
 ждёт_админ = {}  # user_id -> {"действие": str, "chat_id": int}
 ждёт_пароль_админ = {}  # user_id -> chat_id (ожидает ввод пароля для /админ)
+ждёт_смена_кода = {}  # user_id -> True (ожидает ввод нового кода регистрации)
 казик = {}  # chat_id -> blackjack state (краткосрочное, не требует персистентности)
+
+# ─── Код авторизации (кэш + БД) ──────────────────────────────────────────────
+
+_РЕГ_КОД_КЭШ: Optional[str] = None
+_рег_код_lock = threading.Lock()
+
+def получить_рег_код() -> str:
+    """Возвращает текущий код регистрации (из кэша или БД)."""
+    global _РЕГ_КОД_КЭШ
+    with _рег_код_lock:
+        if _РЕГ_КОД_КЭШ is not None:
+            return _РЕГ_КОД_КЭШ
+        row = _выполнить("SELECT value FROM settings WHERE key = 'reg_code'", fetch="one")
+        код = row["value"] if row else "мэлкоины"
+        _РЕГ_КОД_КЭШ = код
+        return код
+
+def установить_рег_код(новый_код: str):
+    """Сохраняет новый код регистрации в кэш и БД."""
+    global _РЕГ_КОД_КЭШ
+    with _рег_код_lock:
+        _РЕГ_КОД_КЭШ = новый_код
+    _записать(
+        "INSERT INTO settings (key, value) VALUES ('reg_code', %s) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        (новый_код,)
+    )
 
 # Постоянный кэш игроков — загружается из БД один раз при старте
 # Остаётся в памяти всё время работы бота → команды отвечают мгновенно
@@ -253,6 +292,18 @@ def _прогреть_кэш():
             "🤜 Ограбление — кради монеты у другого игрока (/ограбить Ник)",
             "40% шанс успеха — крадёшь 15–35% монет жертвы",
             "Провал — платишь штраф жертве. Кулдаун 6 часов.",
+        ],
+    },
+    {
+        "версия": "v1.6",
+        "дата": "2026-05-21",
+        "название": "Авторизация 🔐",
+        "список": [
+            "Новые пользователи должны ввести секретный код чтобы зарегистрироваться",
+            "Код хранится в БД — никуда не исчезает при перезапуске",
+            "Уже зарегистрированные игроки код не вводят",
+            "Колик может посмотреть и сменить код в /админ → 🔑 Код регистрации",
+            "По умолчанию код: мэлкоины",
         ],
     },
 ]
@@ -1027,6 +1078,9 @@ def кнопки_админа():
     markup.row(
         InlineKeyboardButton("📡 Рассылка всем группам", callback_data="admin_рассылка"),
     )
+    markup.row(
+        InlineKeyboardButton("🔑 Код регистрации", callback_data="admin_рег_код"),
+    )
     return markup
 
 def найти_игрока_по_нику(ник):
@@ -1640,14 +1694,18 @@ def start(message):
             if бонус:
                 bot.send_message(chat_id, бонус, parse_mode="Markdown")
         else:
-            ждёт_имя[user_id] = True
             if в_группе(message):
                 bot.send_message(chat_id,
                     f"👋 {message.from_user.first_name}, напиши мне в личку чтобы зарегистрироваться — "
                     f"[открыть личку](https://t.me/{BOT_INFO.username}?start=reg)",
                     parse_mode="Markdown")
             else:
-                bot.send_message(chat_id, "Как тебя зовут?")
+                ждёт_код[user_id] = True
+                bot.send_message(chat_id,
+                    "🔐 *Добро пожаловать в МэлБот!*\n\n"
+                    "Введи секретный код доступа чтобы зарегистрироваться 👇\n\n"
+                    "_Код знают только свои_ 😏",
+                    parse_mode="Markdown")
     except Exception as e:
         log.error(f"/start error: {e}")
 
@@ -1801,6 +1859,24 @@ def admin_callback(call):
                 f"📡 *Рассылка во все группы*\n\n"
                 f"Зарегистрированных групп: *{кол}*{если_нет}\n\n"
                 f"Введи текст — он уйдёт во все группы с ботом:",
+                parse_mode="Markdown")
+
+        elif действие == "рег_код":
+            текущий = получить_рег_код()
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("✏️ Сменить код", callback_data="admin_сменить_код"))
+            bot.send_message(chat_id,
+                f"🔑 *Код регистрации*\n\n"
+                f"Текущий код: `{текущий}`\n\n"
+                f"Этот код нужно ввести новым пользователям чтобы зарегистрироваться в боте.\n"
+                f"Уже зарегистрированные игроки код не вводят.",
+                parse_mode="Markdown", reply_markup=markup)
+
+        elif действие == "сменить_код":
+            ждёт_смена_кода[user_id] = True
+            bot.send_message(chat_id,
+                "✏️ *Введи новый код регистрации:*\n\n"
+                "_Минимум 3 символа. Регистр не важен при вводе._",
                 parse_mode="Markdown")
 
     except Exception as e:
@@ -3485,6 +3561,40 @@ def ответ(message):
                     parse_mode="Markdown", reply_markup=кнопки_админа())
             else:
                 bot.send_message(chat_id, "❌ Неверный пароль. Иди нафиг. 💀")
+            return
+
+        # Ожидание кода авторизации
+        if ждёт_код.get(user_id):
+            ввод_код = message.text.strip().lower()
+            правильный_код = получить_рег_код().lower()
+            if ввод_код == правильный_код:
+                ждёт_код.pop(user_id, None)
+                ждёт_имя[user_id] = True
+                bot.send_message(chat_id,
+                    "✅ *Код принят! Добро пожаловать!*\n\n"
+                    "Как тебя зовут? Введи свой ник 👇",
+                    parse_mode="Markdown")
+            else:
+                bot.send_message(chat_id,
+                    "❌ *Неверный код!*\n\n"
+                    "Спроси у своих — они знают 😏\n\n"
+                    "_Попробуй ещё раз:_",
+                    parse_mode="Markdown")
+            return
+
+        # Ожидание нового кода (только для смены кода в админке)
+        if ждёт_смена_кода.get(user_id) and is_admin(user_id):
+            новый_код = message.text.strip()
+            ждёт_смена_кода.pop(user_id, None)
+            if len(новый_код) < 3:
+                bot.send_message(chat_id, "❌ Код слишком короткий. Минимум 3 символа.")
+                return
+            установить_рег_код(новый_код)
+            bot.send_message(chat_id,
+                f"✅ *Код регистрации изменён!*\n\n"
+                f"🔑 Новый код: `{новый_код}`\n\n"
+                f"_Теперь новые пользователи вводят именно его_",
+                parse_mode="Markdown")
             return
 
         # Ожидание ника
