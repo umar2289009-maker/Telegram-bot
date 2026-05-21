@@ -12,7 +12,7 @@ from datetime import date
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 import psycopg2
 import psycopg2.extras
 
@@ -304,6 +304,18 @@ def _прогреть_кэш():
             "Уже зарегистрированные игроки код не вводят",
             "Колик может посмотреть и сменить код в /админ → 🔑 Код регистрации",
             "По умолчанию код: мэлкоины",
+        ],
+    },
+    {
+        "версия": "v1.7",
+        "дата": "2026-05-21",
+        "название": "Донат через Telegram Stars ⭐",
+        "список": [
+            "Команда /донат — купи мэлкоины за Telegram Stars",
+            "4 пакета: 50⭐→600🪙, 100⭐→1400🪙, 250⭐→4000🪙, 500⭐→9000🪙",
+            "Чем больше пакет — тем выгоднее курс",
+            "После оплаты монеты зачисляются мгновенно",
+            "Stars можно купить прямо в Telegram",
         ],
     },
 ]
@@ -796,6 +808,39 @@ def _удалить_авторесч_из_бд(ключ: str):
         "описание": "Кэшбэк 500 мэлкоинов. Изи бриджи.",
         "эффект_победы": 0,
         "кэшбэк": 500,
+    },
+}
+
+# ─── Донат (Telegram Stars → мэлкоины) ───────────────────────────────────────
+
+ДОНАТ_ПАКЕТЫ = {
+    "stars_50": {
+        "stars": 50,
+        "монеты": 600,
+        "emoji": "⭐",
+        "название": "Стартовый",
+        "описание": "50 Stars → 600 мэлкоинов",
+    },
+    "stars_100": {
+        "stars": 100,
+        "монеты": 1400,
+        "emoji": "🌟",
+        "название": "Нормальный",
+        "описание": "100 Stars → 1400 мэлкоинов (+40 бонус)",
+    },
+    "stars_250": {
+        "stars": 250,
+        "монеты": 4000,
+        "emoji": "💫",
+        "название": "Жирный",
+        "описание": "250 Stars → 4000 мэлкоинов (+500 бонус)",
+    },
+    "stars_500": {
+        "stars": 500,
+        "монеты": 9000,
+        "emoji": "💎",
+        "название": "Бохач",
+        "описание": "500 Stars → 9000 мэлкоинов (+1000 бонус)",
     },
 }
 
@@ -2120,6 +2165,108 @@ def магазин_команда(message):
         показать_магазин_главная(message.chat.id, message.from_user.id)
     except Exception as e:
         log.error(f"/магазин error: {e}")
+
+@bot.message_handler(commands=["донат", "donate", "stars"])
+def донат_команда(message):
+    try:
+        chat_id = message.chat.id
+        user_id = message.from_user.id
+        имя = получить_имя(user_id) or message.from_user.first_name or "незнакомец"
+        статы = загрузить_статы()
+        игрок = получить_игрока(статы, user_id, имя)
+        баланс = игрок.get("мэлкоины", 0)
+
+        текст = (
+            "⭐ *ДОНАТ — Telegram Stars → Мэлкоины*\n"
+            f"{'─' * 22}\n"
+            f"💰 Твой баланс: *{баланс} мэлкоинов*\n\n"
+            "Выбери пакет:\n\n"
+        )
+        for ид, пак in ДОНАТ_ПАКЕТЫ.items():
+            курс = round(пак['монеты'] / пак['stars'], 1)
+            текст += f"{пак['emoji']} *{пак['название']}* — {пак['stars']}⭐\n"
+            текст += f"   +{пак['монеты']}🪙 ({курс} монет за звезду)\n\n"
+
+        текст += "_Stars можно купить прямо в Telegram 👇_"
+
+        markup = InlineKeyboardMarkup()
+        for ид, пак in ДОНАТ_ПАКЕТЫ.items():
+            markup.add(InlineKeyboardButton(
+                f"{пак['emoji']} {пак['название']} — {пак['stars']}⭐ → {пак['монеты']}🪙",
+                callback_data=f"донат_{ид}"
+            ))
+        bot.send_message(chat_id, текст, parse_mode="Markdown", reply_markup=markup)
+    except Exception as e:
+        log.error(f"/донат error: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("донат_"))
+def донат_callback(call):
+    try:
+        chat_id = call.message.chat.id
+        user_id = call.from_user.id
+        ид = call.data[len("донат_"):]
+        bot.answer_callback_query(call.id)
+
+        if ид not in ДОНАТ_ПАКЕТЫ:
+            return
+        пак = ДОНАТ_ПАКЕТЫ[ид]
+
+        bot.send_invoice(
+            chat_id=chat_id,
+            title=f"{пак['emoji']} {пак['название']} пакет",
+            description=f"Получи {пак['монеты']} мэлкоинов 🪙 за {пак['stars']} Telegram Stars ⭐",
+            invoice_payload=f"донат_{ид}_{user_id}",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label=f"{пак['монеты']} мэлкоинов", amount=пак["stars"])],
+            start_parameter=f"buy_{ид}",
+        )
+    except Exception as e:
+        log.error(f"донат callback error: {e}")
+
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def pre_checkout(query):
+    try:
+        bot.answer_pre_checkout_query(query.id, ok=True)
+    except Exception as e:
+        log.error(f"pre_checkout error: {e}")
+
+@bot.message_handler(content_types=["successful_payment"])
+def успешная_оплата(message):
+    try:
+        user_id = message.from_user.id
+        chat_id = message.chat.id
+        payload = message.successful_payment.invoice_payload
+        имя = получить_имя(user_id) or message.from_user.first_name or "незнакомец"
+
+        # Парсим payload: донат_stars_50_123456789
+        части = payload.split("_")
+        ид_пакета = "_".join(части[1:3])  # stars_50
+
+        if ид_пакета not in ДОНАТ_ПАКЕТЫ:
+            bot.send_message(chat_id, "✅ Оплата получена! Обратись к администратору.")
+            return
+
+        пак = ДОНАТ_ПАКЕТЫ[ид_пакета]
+        монеты = пак["монеты"]
+        начислить_мэлкоины(user_id, имя, монеты, chat_id)
+
+        статы = загрузить_статы()
+        игрок = получить_игрока(статы, user_id, имя)
+        новый_баланс = игрок.get("мэлкоины", 0)
+
+        bot.send_message(chat_id,
+            f"💎 *ДОНАТ ПОЛУЧЕН!*\n\n"
+            f"Спасибо, {имя}! 🙏\n\n"
+            f"{пак['emoji']} Пакет: *{пак['название']}*\n"
+            f"⭐ Потрачено: *{пак['stars']} Stars*\n"
+            f"🪙 Начислено: *+{монеты} мэлкоинов*\n\n"
+            f"💰 Новый баланс: *{новый_баланс} мэлкоинов*\n\n"
+            f"_Изи бриджи 😎 Трать с умом_",
+            parse_mode="Markdown")
+        log.info(f"Донат: {имя} ({user_id}) — {пак['название']}, +{монеты} монет")
+    except Exception as e:
+        log.error(f"successful_payment error: {e}")
 
 @bot.message_handler(commands=["баланс"])
 def баланс_команда(message):
@@ -3887,7 +4034,7 @@ while True:
             skip_pending=True,
             interval=0,
             none_stop=True,
-            allowed_updates=["message", "callback_query", "my_chat_member"]
+            allowed_updates=["message", "callback_query", "my_chat_member", "pre_checkout_query"]
         )
     except Exception as e:
         log.error(f"Polling упал: {e}. Перезапуск через 3 сек...")
