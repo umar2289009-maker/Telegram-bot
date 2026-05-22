@@ -2050,8 +2050,9 @@ def admin_callback(call):
                 "`КОД МОНЕТЫ ИСПОЛЬЗОВАНИЙ`\n\n"
                 "Примеры:\n"
                 "`MELCOIN 1000 1` — одноразовый на 1000 монет\n"
-                "`PROMO500 500 10` — 10 использований по 500 монет\n\n"
-                "_КОД автоматически станет заглавными буквами_",
+                "`PROMO500 500 10` — 10 использований по 500 монет\n"
+                "`МОЙ КОД 500 5` — код с пробелом (пробелы поддерживаются)\n\n"
+                "_Числа всегда в конце, код — всё что до них. Станет заглавным автоматически._",
                 parse_mode="Markdown")
 
         elif действие == "удалить_промокод":
@@ -2901,12 +2902,13 @@ def команда_промокод(message):
             bot.send_message(chat_id, "❌ Сначала зарегистрируйся через /start")
             return
 
-        args = message.text.strip().split()
+        args = message.text.strip().split(maxsplit=1)
         if len(args) < 2:
             bot.send_message(chat_id,
                 "🎟 *Промокод*\n\n"
                 "Использование: `/промокод КОД`\n\n"
-                "Пример: `/промокод MELCOIN`",
+                "Пример: `/промокод MELCOIN`\n"
+                "Пример: `/промокод МОЙ КОД`",
                 parse_mode="Markdown")
             return
 
@@ -3845,12 +3847,19 @@ def ответ(message):
             ждёт_промокод_создать.pop(user_id, None)
             части = message.text.strip().split()
             if len(части) < 2:
-                bot.send_message(chat_id, "❌ Неверный формат. Пример: `MELCOIN 1000 1`", parse_mode="Markdown")
+                bot.send_message(chat_id, "❌ Неверный формат. Пример: `МОЙ КОД 1000 1`", parse_mode="Markdown")
                 return
-            код_новый = части[0].upper()
             try:
-                монеты_новые = int(части[1])
-                uses_новые = int(части[2]) if len(части) >= 3 else 1
+                if len(части) >= 3 and части[-1].isdigit() and части[-2].isdigit():
+                    uses_новые = int(части[-1])
+                    монеты_новые = int(части[-2])
+                    код_новый = " ".join(части[:-2]).upper()
+                elif части[-1].isdigit():
+                    монеты_новые = int(части[-1])
+                    uses_новые = 1
+                    код_новый = " ".join(части[:-1]).upper()
+                else:
+                    raise ValueError
             except ValueError:
                 bot.send_message(chat_id, "❌ Монеты и использования — это числа.", parse_mode="Markdown")
                 return
