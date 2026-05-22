@@ -4186,6 +4186,12 @@ def _самопинг():
 threading.Thread(target=_самопинг, daemon=True, name="self-ping").start()
 
 log.info("Бот запущен 🤖")
+log.info("Снимаю вебхук (если был установлен)...")
+try:
+    bot.remove_webhook()
+    log.info("Вебхук снят ✅")
+except Exception as e:
+    log.warning(f"Не удалось снять вебхук: {e}")
 while True:
     try:
         bot.infinity_polling(
