@@ -19,7 +19,7 @@ import psycopg2.extras
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-bot = telebot.TeleBot(os.environ["TELEGRAM_BOT_TOKEN"], parse_mode=None, num_threads=8)
+bot = telebot.TeleBot(os.environ.get("BOT_TOKEN") or os.environ["TELEGRAM_BOT_TOKEN"], parse_mode=None, num_threads=8)
 BOT_INFO = bot.get_me()
 
 # ─── База данных ──────────────────────────────────────────────────────────────
