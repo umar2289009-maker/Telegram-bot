@@ -16,6 +16,8 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPri
 import psycopg2
 import psycopg2.extras
 
+_СТАРТ_ВРЕМЯ = time.time()
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
@@ -1847,11 +1849,10 @@ def start(message):
                     f"[открыть личку](https://t.me/{BOT_INFO.username}?start=reg)",
                     parse_mode="Markdown")
             else:
-                ждёт_код[user_id] = True
+                ждёт_имя[user_id] = True
                 bot.send_message(chat_id,
-                    "🔐 *Добро пожаловать в МэлБот!*\n\n"
-                    "Введи секретный код доступа чтобы зарегистрироваться 👇\n\n"
-                    "_Код знают только свои_ 😏",
+                    "🤖 *Добро пожаловать в МэлБот!*\n\n"
+                    "Как тебя зовут? Введи свой ник 👇",
                     parse_mode="Markdown")
     except Exception as e:
         log.error(f"/start error: {e}")
@@ -2350,6 +2351,38 @@ def баланс_команда(message):
             parse_mode="Markdown")
     except Exception as e:
         log.error(f"/баланс error: {e}")
+
+# ─── Статус бота ──────────────────────────────────────────────────────────────
+
+@bot.message_handler(commands=["статус"])
+def статус_команда(message):
+    try:
+        прошло = int(time.time() - _СТАРТ_ВРЕМЯ)
+        дни = прошло // 86400
+        часы = (прошло % 86400) // 3600
+        минуты = (прошло % 3600) // 60
+        секунды = прошло % 60
+
+        if дни > 0:
+            аптайм = f"{дни}д {часы}ч {минуты}м"
+        elif часы > 0:
+            аптайм = f"{часы}ч {минуты}м {секунды}с"
+        else:
+            аптайм = f"{минуты}м {секунды}с"
+
+        статы = загрузить_статы()
+        игроков = len(статы) if статы else 0
+
+        режим = "🟢 прод" if os.environ.get("NODE_ENV") == "production" else "🔧 dev"
+
+        bot.send_message(message.chat.id,
+            f"🤖 *МэлБот — статус*\n\n"
+            f"⏱ Аптайм: *{аптайм}*\n"
+            f"👥 Игроков в базе: *{игроков}*\n"
+            f"🌐 Режим: {режим}",
+            parse_mode="Markdown")
+    except Exception as e:
+        log.error(f"/статус error: {e}")
 
 # ─── Показ данных ─────────────────────────────────────────────────────────────
 
@@ -3833,23 +3866,14 @@ def ответ(message):
                 bot.send_message(chat_id, "❌ Неверный пароль. Иди нафиг. 💀")
             return
 
-        # Ожидание кода авторизации
+        # Ожидание кода авторизации (устаревший механизм — пропускаем)
         if ждёт_код.get(user_id):
-            ввод_код = message.text.strip().lower()
-            правильный_код = получить_рег_код().lower()
-            if ввод_код == правильный_код:
-                ждёт_код.pop(user_id, None)
-                ждёт_имя[user_id] = True
-                bot.send_message(chat_id,
-                    "✅ *Код принят! Добро пожаловать!*\n\n"
-                    "Как тебя зовут? Введи свой ник 👇",
-                    parse_mode="Markdown")
-            else:
-                bot.send_message(chat_id,
-                    "❌ *Неверный код!*\n\n"
-                    "Спроси у своих — они знают 😏\n\n"
-                    "_Попробуй ещё раз:_",
-                    parse_mode="Markdown")
+            ждёт_код.pop(user_id, None)
+            ждёт_имя[user_id] = True
+            bot.send_message(chat_id,
+                "🤖 *Добро пожаловать в МэлБот!*\n\n"
+                "Как тебя зовут? Введи свой ник 👇",
+                parse_mode="Markdown")
             return
 
         # Ожидание ввода нового промокода (создание)
