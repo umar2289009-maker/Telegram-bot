@@ -1,4 +1,6 @@
 import os
+import sys
+import signal
 import random
 import json
 import time
@@ -4245,6 +4247,17 @@ def _самопинг():
 
 threading.Thread(target=_самопинг, daemon=True, name="self-ping").start()
 
+def _sigterm_handler(signum, frame):
+    log.info("Получен сигнал завершения — останавливаю polling...")
+    try:
+        bot.stop_polling()
+    except Exception:
+        pass
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
+signal.signal(signal.SIGINT, _sigterm_handler)
+
 log.info("Бот запущен 🤖")
 log.info("Снимаю вебхук (если был установлен)...")
 try:
@@ -4252,8 +4265,11 @@ try:
     log.info("Вебхук снят ✅")
 except Exception as e:
     log.warning(f"Не удалось снять вебхук: {e}")
+
+_retry_delay = 3
 while True:
     try:
+        _retry_delay = 3
         bot.infinity_polling(
             timeout=30,
             long_polling_timeout=30,
@@ -4263,5 +4279,11 @@ while True:
             allowed_updates=["message", "callback_query", "my_chat_member", "pre_checkout_query"]
         )
     except Exception as e:
-        log.error(f"Polling упал: {e}. Перезапуск через 3 сек...")
-        time.sleep(3)
+        err = str(e)
+        if "409" in err:
+            log.warning(f"Конфликт 409 — другой инстанс ещё работает. Жду {_retry_delay} сек...")
+            time.sleep(_retry_delay)
+            _retry_delay = min(_retry_delay * 2, 60)
+        else:
+            log.error(f"Polling упал: {e}. Перезапуск через {_retry_delay} сек...")
+            time.sleep(_retry_delay)
